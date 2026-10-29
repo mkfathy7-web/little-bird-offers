@@ -1,0 +1,8 @@
+# الريبو ده عام: كود بس. مفيش بيانات ولا أسعار ولا مفاتيح.
+offers.json
+*.csv
+*.json
+!package.json
+.cache/
+__pycache__/
+.env
