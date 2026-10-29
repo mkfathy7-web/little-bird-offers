@@ -7,6 +7,8 @@
 - لكل متجر بيقرا صفحة/قسم العروض بس (من 1 لـ 20 طلب): سبينيس وجورميه (أقسام العروض)، ومحلات WooCommerce (`on_sale=true`).
 - بيطلّع `offers.json`: المتجر، الكود، الاسم، السعر، السعر قبل الخصم، اللينك، وقت ما شفناه.
 - بيرفعه على مخزن **مقفول** في Supabase (`prices/offers/latest.json`). الجمع الأساسي اللي بعده بيدمجه في الأسعار.
+- لو حد مستني منتج («منتجاتي اللي مستنيها») ونزل عليه عرض جديد، بيبعتله إيميل (Brevo) في نفس الساعة.
+  ملف الأسعار بيتحمّل بس لو فيه منتج مستني عليه عرض جديد (عشان نوفّر استهلاك Supabase).
 
 ## القواعد (مش بتتغيّر)
 - بنحترم `robots.txt` لكل موقع (ومعاه الـ API)، و`Crawl-delay`.
@@ -19,6 +21,7 @@
 - **مفيش مفاتيح في الكود.** المفاتيح في GitHub → Settings → Secrets and variables → Actions:
   - Secret: `SUPABASE_SERVICE_KEY` (مفتاح service_role القديم، بيبدأ بـ eyJ)، `ARKHAS_CONTACT` (إيميل التواصل).
   - Variable: `SUPABASE_URL`.
+  - للإيميلات (اختياري): Secret `BREVO_API_KEY`، وVariables `ALERT_SENDER` و `SITE_URL`.
 - الـ workflow مش بيشتغل على pull requests، عشان المفاتيح متوصلش لحد.
 
 ## تجربة على الجهاز

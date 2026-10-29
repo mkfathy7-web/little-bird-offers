@@ -24,6 +24,10 @@ jobs:
       ARKHAS_CONTACT: ${{ secrets.ARKHAS_CONTACT }}
       SUPABASE_URL: ${{ vars.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      # إيميلات المنتجات المستنية (اختياري): من غير BREVO_API_KEY الخطوة بتتساب
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      ALERT_SENDER: ${{ vars.ALERT_SENDER }}
+      SITE_URL: ${{ vars.SITE_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,4 +39,9 @@ jobs:
       - name: العروض ← Supabase (مقفول)
         run: |
           if [ -z "$SUPABASE_SERVICE_KEY" ] || [ -z "$SUPABASE_URL" ]; then echo "المفتاح مش متحط، اتساب"; exit 0; fi
-          python offers.py --upload >> "$GITHUB_STEP_SUMMARY"
+          # offers.json على جهاز GitHub المؤقت بس (مبيتعملوش commit ولا artifact)
+          python offers.py --upload --out offers.json >> "$GITHUB_STEP_SUMMARY"
+      - name: إيميلات المنتجات المستنية (لو فيه عرض جديد عليها)
+        run: |
+          if [ -z "$BREVO_API_KEY" ] || [ ! -f offers.json ]; then echo "اتساب"; exit 0; fi
+          python alerts.py offers.json >> "$GITHUB_STEP_SUMMARY" || echo "::warning::الإيميلات فشلت"
