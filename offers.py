@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -25,6 +26,7 @@ CONTACT = os.environ.get("ARKHAS_CONTACT", "contact-not-set")
 USER_AGENT = f"LittleBirdOffers/1.0 (+{CONTACT})"
 MIN_DELAY = 3.0
 MAX_REQUESTS = 20  # لكل متجر في التشغيل
+MAX_WAIT = 300  # Crawl-delay أكبر من كده: بنقف المتجر بدل ما نستنى ساعات (فحص الأمان)
 
 
 class Refused(Exception):
@@ -48,7 +50,9 @@ class Polite:
         host = self._host(url)
         if host not in self._robots:
             r = self._raw(f"{host}/robots.txt")
-            text = "User-agent: *\nDisallow: /" if r.status_code in (401, 403) else ("" if r.status_code >= 400 else r.text)
+            # 401/403 أو عطل في السيرفر (5xx): نعتبره منع، زي جوجل. 404 بس = مفيش قواعد
+            blocked = r.status_code in (401, 403) or r.status_code >= 500
+            text = "User-agent: *\nDisallow: /" if blocked else ("" if r.status_code >= 400 else r.text)
             self._robots[host] = Robots(text)
         return self._robots[host]
 
@@ -57,6 +61,8 @@ class Polite:
         delay = MIN_DELAY
         rb = self._robots.get(host)
         if rb and (cd := rb.crawl_delay(USER_AGENT)):
+            if cd > MAX_WAIT:
+                raise Refused(f"Crawl-delay {cd} ثانية أكبر من {MAX_WAIT}")
             delay = max(delay, cd)
         last = self._last.get(host)
         if last is not None and self._clock() - last < delay:
@@ -69,6 +75,10 @@ class Polite:
         if not self.robots(url).allowed(USER_AGENT, url):
             raise Refused(f"robots.txt مش بيسمح: {url}")
         r = self._raw(url)
+        # تحويل لموقع تاني (أو http) معناه إن الرد مش من المتجر: منقبلوش (فحص الأمان)
+        final = getattr(r, "url", None) or url
+        if _site(final) != _site(url) or urlsplit(final).scheme != "https":
+            raise Refused(f"{url} اتحوّل لمكان تاني")
         if r.status_code in (401, 403, 429, 503):
             raise Refused(f"{url} رجّع {r.status_code}")
         r.raise_for_status()
@@ -77,13 +87,23 @@ class Polite:
         return r.json()
 
 
+def _site(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 def _offer(store, pid, name, price, was, url) -> dict | None:
     try:
         price, was = float(price), float(was) if was not in (None, "") else None
     except (TypeError, ValueError):
         return None
-    if not price or not was or was <= price:
-        return None  # مش عرض
+    # «nan» و«1e999» بيعدّوا float(): أرقام محدودة بس (فحص الأمان)
+    if was is None or not (math.isfinite(price) and math.isfinite(was) and 0 < price < 1_000_000):
+        return None
+    if not price < was <= price * 3:
+        return None  # مش عرض (أو «كان» مش معقول)
+    if url and (urlsplit(url).scheme != "https" or _site(url) != _site(SITES[store])):
+        url = ""  # لينك المنتج لازم يكون على نفس المتجر وhttps (فحص الأمان)
     return {"store": store, "id": str(pid), "name": " ".join(str(name).split()), "price": round(price, 2),
             "was_price": round(was, 2), "url": url}
 
@@ -109,15 +129,15 @@ _PAGE = ("{products(filter:{category_id:{eq:%s}},pageSize:50,currentPage:%d,sort
 def magento(c: Polite, store: str) -> list[dict]:
     host, link, id_of = MAGENTO[store]
     cats = c.get_json(f"{host}/graphql?query={quote(_CATS)}")
-    items = (((cats.get("data") or {}).get("categories") or {}).get("items")) or []
-    offer_cats = sorted((i for i in items if any(w in (i.get("url_path") or "").lower() for w in _OFFER_WORDS)
+    items = (((cats.get("data") or {}).get("categories") or {}).get("items")) or [] if isinstance(cats, dict) else []
+    offer_cats = sorted((i for i in items if isinstance(i, dict) and any(w in (i.get("url_path") or "").lower() for w in _OFFER_WORDS)
                          and (i.get("product_count") or 0) > 0), key=lambda i: i.get("product_count") or 0)
     out: dict[str, dict] = {}
     for cat in offer_cats:
         page, total = 1, 1
         while page <= total and c.count < MAX_REQUESTS:
             data = c.get_json(f"{host}/graphql?query={quote(_PAGE % (json.dumps(str(cat['id'])), page))}")
-            prod = ((data.get("data") or {}).get("products")) or {}
+            prod = ((data.get("data") or {}).get("products")) or {} if isinstance(data, dict) else {}
             total = (prod.get("page_info") or {}).get("total_pages") or 1
             for it in prod.get("items") or []:
                 if not isinstance(it, dict) or not it.get("url_key"):
@@ -152,10 +172,15 @@ def woo(c: Polite, store: str) -> list[dict]:
             items = c.get_json(url)
         except requests.HTTPError:
             break  # بعد آخر صفحة
-        for p in items or []:
-            pr = p.get("prices") or {}
-            unit = 10 ** int(pr.get("currency_minor_unit") or 0)
+        if not isinstance(items, list):
+            break
+        for p in items:
+            pr = p.get("prices") if isinstance(p, dict) else None
+            if not isinstance(pr, dict):
+                continue
             try:
+                # من 0 لـ 4 بس: «currency_minor_unit: 999999» كان بيعمل رقم ضخم (فحص الأمان)
+                unit = 10 ** min(max(int(pr.get("currency_minor_unit") or 0), 0), 4)
                 price, was = int(pr.get("price")) / unit, int(pr.get("regular_price")) / unit
             except (TypeError, ValueError):
                 continue
@@ -168,6 +193,7 @@ def woo(c: Polite, store: str) -> list[dict]:
 
 
 SOURCES = {**{s: magento for s in MAGENTO}, **{s: woo for s in WOO}}
+SITES = {**{s: v[0] for s, v in MAGENTO.items()}, **WOO}
 
 
 def collect(only: list[str] | None = None, session=None, sleep=time.sleep) -> tuple[list[dict], dict]:
@@ -183,7 +209,7 @@ def collect(only: list[str] | None = None, session=None, sleep=time.sleep) -> tu
             offers += [{**o, "seen_at": seen_at} for o in found]
         except Refused as e:
             report[store] = {"refused": str(e)[:200], "requests": c.count}
-        except (requests.RequestException, ValueError) as e:
+        except Exception as e:  # noqa: BLE001 — متجر واحد بايظ ميوقفش الباقيين (فحص الأمان)
             report[store] = {"error": type(e).__name__, "requests": c.count}
     return offers, report
 
@@ -206,7 +232,7 @@ def main(argv=None) -> int:
     ap.add_argument("--upload", action="store_true", help="ارفع على Supabase (المخزن المقفول)")
     a = ap.parse_args(argv)
     offers, report = collect(a.store)
-    body = json.dumps({"taken_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+    body = json.dumps(allow_nan=False, obj={"taken_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
                        "offers": offers, "report": report}, ensure_ascii=False).encode("utf-8")
     if a.out:
         with open(a.out, "wb") as f:

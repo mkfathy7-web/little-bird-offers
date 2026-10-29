@@ -59,6 +59,51 @@ class OffersTest(unittest.TestCase):
         found, report = offers.collect(["ecart"], session=s, sleep=lambda _: None)
         self.assertIn("robots", report["ecart"]["refused"])
 
+    # ---- فحص الأمان (الجولة 3)
+    def test_prices_must_be_finite_and_reasonable(self):
+        self.assertIsNone(offers._offer("ecart", 1, "x", "nan", "50", ""))
+        self.assertIsNone(offers._offer("ecart", 1, "x", "40", "1e999", ""))
+        self.assertIsNone(offers._offer("ecart", 1, "x", "-5", "50", ""))
+        self.assertIsNone(offers._offer("ecart", 1, "x", "10", "50", ""))  # «كان» أكتر من 3 أضعاف
+        o = offers._offer("ecart", 1, "x", "40", "50", "http://evil.com/x")
+        self.assertEqual(o["url"], "")  # لينك برّه المتجر بيتشال
+        self.assertEqual(offers._offer("ecart", 1, "x", "40", "50", "https://www.ecart-eg.com/p")["url"],
+                         "https://www.ecart-eg.com/p")
+
+    def test_woo_bad_minor_unit_and_junk_items(self):
+        items = ["junk", {"id": 3, "prices": "x"},
+                 {"id": 1, "name": "رز", "prices": {"price": "4000", "regular_price": "5000", "currency_minor_unit": 999999}}]
+        s = Session({"robots.txt": Resp(404, text=""), "on_sale=true": Resp(200, items)})
+        found, report = offers.collect(["ecart"], session=s, sleep=lambda _: None)
+        self.assertEqual([(o["id"], o["price"]) for o in found], [("1", 0.4)])  # الحد 4 أرقام عشرية
+
+    def test_redirect_to_other_site_refused(self):
+        r = Resp(200, [])
+        r.url = "https://evil.example/wp-json/x"
+        s = Session({"robots.txt": Resp(404, text=""), "on_sale=true": r})
+        found, report = offers.collect(["ecart"], session=s, sleep=lambda _: None)
+        self.assertIn("refused", report["ecart"])
+
+    def test_robots_server_error_means_disallow(self):
+        s = Session({"robots.txt": Resp(500, text="")})
+        found, report = offers.collect(["ecart"], session=s, sleep=lambda _: None)
+        self.assertIn("robots", report["ecart"]["refused"])
+        self.assertEqual(len(s.got), 1)
+
+    def test_huge_crawl_delay_stops_store(self):
+        s = Session({"robots.txt": Resp(200, text="User-agent: *\nCrawl-delay: 99999")})
+        slept = []
+        found, report = offers.collect(["ecart"], session=s, sleep=slept.append)
+        self.assertIn("refused", report["ecart"])
+        self.assertEqual(slept, [])
+
+    def test_unexpected_error_stops_one_store_only(self):
+        s = Session({"robots.txt": Resp(404, text=""), "on_sale=true": Resp(200, {"not": "a list"}),
+                     "graphql": Resp(200, ["not", "a", "dict"])})
+        found, report = offers.collect(["ecart", "spinneys"], session=s, sleep=lambda _: None)
+        self.assertEqual(found, [])
+        self.assertEqual(set(report), {"ecart", "spinneys"})
+
 
 if __name__ == "__main__":
     unittest.main()

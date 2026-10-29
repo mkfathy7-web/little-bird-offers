@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import datetime
 
@@ -32,7 +33,9 @@ def merge(prices: dict, offers: dict) -> int:
         if taken and seen and seen.astimezone() <= taken.astimezone():
             continue
         price, was = o.get("price"), o.get("was_price")
-        if not price or not was or was <= price or (row[2] == price and row[3] == was):
+        # أرقام حقيقية محدودة، والخصم معقول (نفس حد الـ 3 أضعاف بتاع الجمع)، وإلا منلمسش السعر (فحص الأمان)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (price, was)) \
+                or not 0 < price < was <= price * 3 or (row[2] == price and row[3] == was):
             continue
         row[2], row[3] = price, was
         changed += 1
@@ -49,5 +52,5 @@ if __name__ == "__main__":
         offers = json.load(f)
     n = merge(prices, offers)
     with open(prices_path, "w", encoding="utf-8") as f:
-        json.dump(prices, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(prices, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     print(f"عروض الساعة: اتحدّث {n} منتج", file=sys.stderr)

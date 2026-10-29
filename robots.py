@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -19,12 +18,24 @@ class _Group:
     crawl_delay: float | None = None
 
 
-def _compile(pattern: str) -> re.Pattern:
+def _matches(pattern: str, path: str) -> bool:
+    """قاعدة robots زي جوجل (* = أي حاجة، $ = آخر الرابط) من غير regex: «/*a*a*a…*b» كانت بتاخد ثواني
+    (فحص الأمان). بندوّر على كل جزء بعد اللي قبله (أول مكان)، وده كفاية للـ * زي ما الـ regex الكسلان بيعمل."""
     anchored = pattern.endswith("$")
-    if anchored:
-        pattern = pattern[:-1]
-    rx = "".join(".*" if ch == "*" else re.escape(ch) for ch in pattern)
-    return re.compile(rx + ("$" if anchored else ""))
+    parts = (pattern[:-1] if anchored else pattern).split("*")
+    if not path.startswith(parts[0]):
+        return False
+    i = len(parts[0])
+    for p in parts[1:]:
+        j = path.find(p, i)
+        if j < 0:
+            return False
+        i = j + len(p)
+    if not anchored:
+        return True
+    if len(parts) == 1:
+        return path == parts[0]
+    return path.endswith(parts[-1]) and len(path) - len(parts[-1]) >= len(parts[0])
 
 
 class Robots:
@@ -80,7 +91,7 @@ class Robots:
         verdict, best_len = True, -1
         for allow, pattern in group.rules:
             target = path if pattern.startswith("/") else path.lstrip("/")
-            if _compile(pattern).match(target):
+            if _matches(pattern, target):
                 if len(pattern) > best_len or (len(pattern) == best_len and allow):
                     verdict, best_len = allow, len(pattern)
         return verdict
