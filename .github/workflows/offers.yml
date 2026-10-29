@@ -1,6 +1,8 @@
 # فحص العروض كل ساعة من 8 الصبح لـ 12 بالليل بتوقيت القاهرة (UTC+2: الساعة 6 لـ 22 UTC).
 # الكود بس في الريبو العام ده. الأسعار بتترفع على المخزن المقفول في Supabase بالمفتاح السري، ومفيش commit لأي بيانات.
 # مفيش pull_request: المفاتيح عمرها ما توصل لـ PR من fork.
+# فحص الأمان: المفاتيح في الخطوتين اللي محتاجينها بس (مش في تسطيب المكتبات والاختبارات)، والمكتبات مثبّتة بالـ hash،
+# والـ actions مثبّتة برقم الـ commit، واللوج (العام) مفيهوش أعداد.
 name: فحص العروض
 
 on:
@@ -21,27 +23,34 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUTF8: "1"
-      ARKHAS_CONTACT: ${{ secrets.ARKHAS_CONTACT }}
-      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      # إيميلات المنتجات المستنية (اختياري): من غير BREVO_API_KEY الخطوة بتتساب
-      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
-      ALERT_SENDER: ${{ vars.ALERT_SENDER }}
-      SITE_URL: ${{ vars.SITE_URL }}
+      QUIET_LOGS: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install --require-hashes --no-deps -r requirements.txt
       - name: الاختبارات
         run: python -m unittest discover tests
       - name: العروض ← Supabase (مقفول)
+        env:
+          ARKHAS_CONTACT: ${{ secrets.ARKHAS_CONTACT }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -z "$SUPABASE_SERVICE_KEY" ] || [ -z "$SUPABASE_URL" ]; then echo "المفتاح مش متحط، اتساب"; exit 0; fi
-          # offers.json على جهاز GitHub المؤقت بس (مبيتعملوش commit ولا artifact)
-          python offers.py --upload --out offers.json >> "$GITHUB_STEP_SUMMARY"
+          # offers.json على جهاز GitHub المؤقت بس (مبيتعملوش commit ولا artifact). اللوج العام من غير أعداد
+          python offers.py --upload --out offers.json > /dev/null
+          echo "العروض اترفعت" >> "$GITHUB_STEP_SUMMARY"
       - name: إيميلات المنتجات المستنية (لو فيه عرض جديد عليها)
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          ALERT_SENDER: ${{ vars.ALERT_SENDER }}
+          SITE_URL: ${{ vars.SITE_URL }}
         run: |
           if [ -z "$BREVO_API_KEY" ] || [ ! -f offers.json ]; then echo "اتساب"; exit 0; fi
-          python alerts.py offers.json >> "$GITHUB_STEP_SUMMARY" || echo "::warning::الإيميلات فشلت"
+          python alerts.py offers.json > /dev/null || echo "::warning::الإيميلات فشلت"

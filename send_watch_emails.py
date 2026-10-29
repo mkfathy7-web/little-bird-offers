@@ -168,40 +168,85 @@ def main(argv: list[str] | None = None) -> int:
         if now["store"]:
             where = (f"أرخص عند {now['store']}: {now['total']:g} ج" if arabic else f"Cheapest at {now['store']}: {now['total']:g} EGP")
         u["lines"].append({"label": w["label"], "why": [p[0] if arabic else p[1] for p in why], "where": where})
-    sent = 0
+    sent = failed = 0
+    by_id = {w["id"]: w for w in watches}
     for uid, u in by_user.items():
-        unsub = f"{site}unsubscribe?t={u['unsub']}" if u["unsub"] else site
-        subject = (f"Little Bird: {u['lines'][0]['label']}" + (f" و{len(u['lines']) - 1} كمان" if len(u["lines"]) > 1 else "")
-                   if u["arabic"] else
-                   f"Little Bird: {u['lines'][0]['label']}" + (f" and {len(u['lines']) - 1} more" if len(u["lines"]) > 1 else ""))
-        body = email_html(u["name"], u["lines"], site, unsub, u["arabic"])
-        if a.dry_run:
-            print(f"[dry-run] {len(u['lines'])} منتج لحساب {uid[:8]}…: {subject}")
+        mine = [x for x in updates if x[2] and by_id[x[0]]["user_id"] == uid]
+        # نحجز المنتجات دي الأول (لو تشغيل تاني بيبعت في نفس الوقت، واحد بس هيكسب): إيميل واحد في اليوم بجد
+        claimed = [] if a.dry_run else [wid for wid, _, _ in mine if _claim(url, key, wid, at)]
+        if not a.dry_run and not claimed:
             continue
-        res = requests.post(BREVO_URL, timeout=30, headers={"api-key": brevo, "accept": "application/json",
-                                                             "content-type": "application/json"}, json={
-            "sender": {"name": "Little Bird", "email": sender},
-            "to": [{"email": u["email"], **({"name": u["name"]} if u["name"] else {})}],
-            "subject": subject,
-            "htmlContent": body,
-            "headers": {"List-Unsubscribe": f"<{unsub}>"},
-            "tags": ["watch"],
-        })
-        if res.status_code >= 300:
-            print(f"Brevo رفض إيميل لحساب {uid[:8]}… ({res.status_code})", file=sys.stderr)
-            # منحدّثش حالة منتجاته عشان يتجرّب تاني المرة الجاية
-            updates = [x for x in updates if not (x[2] and any(w["id"] == x[0] and w["user_id"] == uid for w in watches))]
+        unsub = f"{site}unsubscribe?t={u['unsub']}" if u["unsub"] else site
+        first = clean(u["lines"][0]["label"])
+        more = len(u["lines"]) - 1
+        subject = (f"Little Bird: {first}" + (f" و{more} كمان" if more else "") if u["arabic"]
+                   else f"Little Bird: {first}" + (f" and {more} more" if more else ""))
+        body = email_html(clean(u["name"]), u["lines"], site, unsub, u["arabic"])
+        if a.dry_run:
+            log(f"[dry-run] {len(u['lines'])} منتج: {subject}")
+            continue
+        try:
+            res = requests.post(BREVO_URL, timeout=30, headers={"api-key": brevo, "accept": "application/json",
+                                                                 "content-type": "application/json"}, json={
+                "sender": {"name": "Little Bird", "email": sender},
+                "to": [{"email": u["email"], **({"name": clean(u["name"])} if u["name"] else {})}],
+                "subject": subject,
+                "htmlContent": body,
+                # إلغاء بدوسة واحدة (Gmail و Yahoo بيطلبوه للإيميلات الكتير)
+                "headers": {"List-Unsubscribe": f"<{unsub}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"},
+                "tags": ["watch"],
+            })
+            ok = res.status_code < 300
+        except requests.RequestException:
+            ok = False
+        if not ok:
+            failed += 1
+            # نرجّع الحجز ومنحدّثش حالة منتجاته، عشان يتجرّب تاني المرة الجاية
+            for wid in claimed:
+                _patch(url, key, wid, {"last_notified_at": by_id[wid].get("last_notified_at")})
+            updates = [x for x in updates if x[0] not in claimed]
             continue
         sent += 1
     if a.dry_run:
-        print(f"[dry-run] {len(watches)} منتج متابَع، {len(by_user)} إيميل")
+        log(f"[dry-run] {len(watches)} منتج متابَع، {len(by_user)} إيميل")
         return 0
-    for wid, now, notified in updates:
-        patch = {"last_state": now, **({"last_notified_at": at.isoformat()} if notified else {})}
-        requests.patch(f"{url}/rest/v1/product_watches?id=eq.{wid}", headers={**_supabase_headers(key), "Prefer": "return=minimal"},
-                       json=patch, timeout=30)
-    print(f"{len(watches)} منتج متابَع، اتبعت {sent} إيميل")
+    bad = sum(0 if _patch(url, key, wid, {"last_state": now}) else 1 for wid, now, _ in updates)
+    log(f"{len(watches)} منتج متابَع، اتبعت {sent} إيميل" + (f"، {failed} فشل" if failed else "")
+        + (f"، {bad} حالة متحفظتش" if bad else ""))
     return 0
+
+
+def clean(text) -> str:
+    """من غير سطور جديدة ولا رموز تحكم (عنوان الإيميل واسم المرسل إليه)، و120 حرف بالكتير."""
+    return " ".join("".join(ch if ch.isprintable() else " " for ch in str(text or "")).split())[:120]
+
+
+def log(text: str) -> None:
+    # في الريبو العام (little-bird-offers) اللوج عام: QUIET_LOGS=1 بيخفي الأعداد
+    if os.environ.get("QUIET_LOGS") != "1":
+        print(text)
+
+
+def _patch(url: str, key: str, wid: str, body: dict) -> bool:
+    try:
+        r = requests.patch(f"{url}/rest/v1/product_watches?id=eq.{wid}",
+                           headers={**_supabase_headers(key), "Prefer": "return=minimal"}, json=body, timeout=30)
+        return r.status_code < 300
+    except requests.RequestException:
+        return False
+
+
+def _claim(url: str, key: str, wid: str, at: datetime) -> bool:
+    """بيحط last_notified_at = دلوقتي بس لو مكانش اتبعت آخر 23 ساعة، وبيقول لو نجح (ذرّي في قاعدة البيانات)."""
+    since = (at - ONE_DAY).isoformat()
+    try:
+        r = requests.patch(
+            f"{url}/rest/v1/product_watches?id=eq.{wid}&or=(last_notified_at.is.null,last_notified_at.lt.{since})",
+            headers={**_supabase_headers(key), "Prefer": "return=representation"},
+            json={"last_notified_at": at.isoformat()}, timeout=30)
+        return r.status_code < 300 and bool(r.json())
+    except (requests.RequestException, ValueError):
+        return False
 
 
 if __name__ == "__main__":
