@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -20,6 +22,7 @@ from urllib.parse import quote, urlsplit
 
 import requests
 
+import radar
 from robots import Robots
 
 CONTACT = os.environ.get("ARKHAS_CONTACT", "contact-not-set")
@@ -225,6 +228,25 @@ def upload(body: bytes) -> None:
         sys.exit(f"الرفع فشل ({r.status_code})")  # من غير ما نطبع الرد (ممكن يبقى فيه تفاصيل)
 
 
+def workflow_cron(path: str | None = None) -> str | None:
+    """مواعيد الفحص من .github/workflows/offers.yml نفسه (أول سطر cron، بتوقيت UTC)، عشان التطبيق يحسب الفحص
+    الجاي («استنى 10 دقايق»، فكرة 106) من غير ما المواعيد تتكتب ثابتة في الكود."""
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".github", "workflows", "offers.yml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = re.search(r"^\s*-\s*cron:\s*(.+?)\s*$", f.read(), re.M)
+    except OSError:
+        return None
+    return m.group(1).strip("\"' ") if m else None
+
+
+def offers_sha(offers: list[dict]) -> str:
+    """بصمة العروض نفسها (من غير وقت الفحص): التطبيق بيعرف منها إن العروض اتغيّرت."""
+    plain = [{k: v for k, v in o.items() if k != "seen_at"} for o in offers]
+    raw = json.dumps(plain, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="offers")
     ap.add_argument("--store", action="append", help="متجر واحد أو أكتر (من غير: الكل)")
@@ -232,13 +254,18 @@ def main(argv=None) -> int:
     ap.add_argument("--upload", action="store_true", help="ارفع على Supabase (المخزن المقفول)")
     a = ap.parse_args(argv)
     offers, report = collect(a.store)
-    body = json.dumps(allow_nan=False, obj={"taken_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-                       "offers": offers, "report": report}, ensure_ascii=False).encode("utf-8")
+    taken = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    body = json.dumps(allow_nan=False, obj={"taken_at": taken, "cron": workflow_cron(), "sha": offers_sha(offers),
+                                            "offers": offers, "report": report}, ensure_ascii=False).encode("utf-8")
     if a.out:
         with open(a.out, "wb") as f:
             f.write(body)
     if a.upload:
         upload(body)
+        try:
+            radar.push(offers, taken)  # عدد عروض الرادار للموقع (أرقام بس)
+        except Exception as e:  # noqa: BLE001 — الرادار مبيوقفش العروض ولا الإيميلات
+            print(f"عدد الرادار متحدّثش ({type(e).__name__})")
     for store, r in report.items():
         print(f"{store}: {r}")
     print(f"إجمالي العروض: {len(offers)}")

@@ -19,7 +19,7 @@ import html
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -48,8 +48,29 @@ def covers(data: dict, store: str, area: str | None) -> bool:
     return "*" in areas or area in areas
 
 
+_AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
+_EN_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def day_text(iso: str, arabic: bool) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d.day} {_AR_MONTHS[d.month - 1]}" if arabic else f"{_EN_MONTHS[d.month - 1]} {d.day}"
+
+
+def days_of(data: dict) -> tuple[str | None, str | None]:
+    """يوم الأسعار دي، وأول يوم في التاريخ اللي بنقارن بيه (history_start، أو من 60 يوم): الإيميل بيقول
+    «من يوم 24 أكتوبر» بدل «في آخر 60 يوم» (مش صحيحة قبل ما يعدّي 60 يوم على أول تاريخ). زي الريبو الأساسي."""
+    try:
+        today = datetime.fromisoformat((data.get("taken_at") or "").replace("Z", "+00:00")).date()
+    except ValueError:
+        return None, None
+    start = data.get("history_start")
+    since = max(date.fromisoformat(start), today - timedelta(days=60)) if start else None
+    return today.isoformat(), since.isoformat() if since else None
+
+
 def state_of(watch: dict, data: dict, index: dict[str, list]) -> dict:
-    """الحالة دلوقتي: متوفر؟ متوفر في منطقتي؟ أرخص سعر للكيلو، وهل هو أقل سعر في آخر 60 يوم."""
+    """الحالة دلوقتي: متوفر؟ متوفر في منطقتي؟ أرخص سعر للكيلو، وهل هو أقل سعر شفناه من أول تاريخنا."""
     rows = [index[k] for k in watch.get("offers") or [] if k in index]
     stock = [r for r in rows if r[9]]
     near = [r for r in stock if covers(data, r[-1], watch.get("area_slug"))]
@@ -68,6 +89,8 @@ def state_of(watch: dict, data: dict, index: dict[str, list]) -> dict:
         "low": low,
         "store": best[-1] if best else None,
         "total": best[2] if best else None,
+        "day": days_of(data)[0],
+        "since": days_of(data)[1],
     }
 
 
@@ -83,10 +106,13 @@ def reasons(watch: dict, now: dict) -> list[tuple[str, str]]:
     if limit is not None and now["price"] is not None and now["price"] <= float(limit):
         before = last.get("price")
         if before is None or before > float(limit):
-            out.append((f"السعر بقى {now['price']:g} ج (أقل من {float(limit):g})",
-                        f"Price is now {now['price']:g} EGP (under {float(limit):g})"))
+            day = now.get("day")
+            out.append((f"السعر بقى {now['price']:g} ج" + (f" يوم {day_text(day, True)}" if day else "") + f" (أقل من {float(limit):g})",
+                        f"Price is {now['price']:g} EGP" + (f" on {day_text(day, False)}" if day else "") + f" (under {float(limit):g})"))
     if watch.get("when_best_time") and now["low"] and not last.get("low"):
-        out.append(("ده أقل سعر شفناه في آخر 60 يوم", "Lowest price we've seen in 60 days"))
+        since = now.get("since")
+        out.append((f"ده أقل سعر شفناه من يوم {day_text(since, True)}", f"Lowest price we've seen since {day_text(since, False)}")
+                   if since else ("ده أقل سعر شفناه", "Lowest price we've seen"))
     return out
 
 
